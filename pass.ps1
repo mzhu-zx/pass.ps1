@@ -33,9 +33,67 @@ if (! (Test-Path -Path $PasswordStorePath)) {
     }
 }
 
-$KeyPath = (Join-Path $PasswordStorePath $RelativePath) + ".gpg"
+$AbsolutePath = Join-Path $PasswordStorePath $RelativePath
+$KeyPath = $AbsolutePath + ".gpg"
 $GpgId = Get-Content (Join-Path $PasswordStorePath ".gpg-id")
 $GpgOpts = @("--quiet", "--yes", "--compress-algo=none", "--no-encrypt-to")
+$ExcludeGit = @{
+    Exclude = ".git*", ".gpg*"
+}
+
+Set-Variable -name LeafFormat -value ([string]"|-- ") -option Constant
+Set-Variable -name LastLeafFormat -value ([string]"``-- ") -option Constant
+Set-Variable -name TrunkFormat -value ([string]"|   ") -option Constant
+
+<# 
+    Prettyprint an IsoRecursive Rose Tree
+
+#>
+function Out-Tree {
+    Param(
+        $Path
+    )    
+    Out-TreeInternal (Get-Item $Path) -Depth 0
+}
+
+function Out-TreeInternal {
+    Param(
+        $Info,
+        [int]$Depth,
+        [bool]$Last
+    )
+
+    if ($Depth -eq 0) {
+        $Format = "{0}"
+    } 
+    else {
+        $Format = $TrunkFormat * ($Depth - 1) + ($Last ? $LastLeafFormat : $LeafFormat) + "{0}";
+    }
+
+    $KeyName = ($Info.Name -match "(?<path>.*).gpg") ? $Matches['path'] : $Info.Name
+    if (-not ($KeyName -like ".*" )) {
+        Write-Host ($Format -f $KeyName)
+    }
+    
+    If (Test-Path -Path $Info.FullName -PathType Container) {
+        $Children = (Get-ChildItem @ExcludeGit $Info.FullName)
+        if ($Children -is [object[]]) {
+            switch ($Children.Length) {
+                0 { return; }
+                1 { Out-TreeInternal $Children[0] ($Depth + 1) $true }
+                Default {
+                    foreach ($child in $Children[0..($Children.Length - 2)]) {
+                        Out-TreeInternal $child ($Depth + 1)
+                    }
+                    Out-TreeInternal $Children[$Children.Length - 1] ($Depth + 1) $true
+                }
+            }
+        }
+        else {
+            Out-TreeInternal $Children ($Depth + 1) $true
+        }
+    }
+}
 
 function Write-Password {
     param ( [string] $Password )
@@ -49,6 +107,15 @@ function Write-Password {
 }
 
 # pass show
+function Get-PasswordItems {
+    if (Test-Path $AbsolutePath -PathType Container) {
+        return (Out-Tree $AbsolutePath)
+    }
+    else {
+        return Read-Password
+    }
+}
+
 function Read-Password {
     $Path = $KeyPath
     $Password = (gpg.exe --decrypt $Path)
@@ -60,38 +127,22 @@ function Get-PasswordFile {
     # $ParentPath = Split-Path $RelativePath
     $LeafPath = Split-Path -Leaf $RelativePath
     # $LeafLike = "*$LeafPath*"
-    $CoarsePass = @{
-        # Path    = (Join-Path $PasswordStorePath -ChildPath $ParentPath)
-        Path    =  $PasswordStorePath
-        Exclude = ".git*"
-    }
     $LikeOptions = @{
         # Include = $LeafLike
         Recurse = $true
     }
-    # $Like = Get-ChildItem @CoarsePass |
-    #     Get-ChildItem @LikeOptions |
-    #     Resolve-Path -RelativeBasePath $PasswordStorePath -Relative |
-    #     ForEach-Object {
-    #         if ($_ -match ".\\(?<path>.*).gpg") {
-    #             $matches['path']            
-    #         }
-    #         else {
-    #             $_
-    #         }
-    #     }
-    $Like = Get-ChildItem @CoarsePass |
-        Get-ChildItem @LikeOptions |
-        Where-Object {  $_.FullName | Select-String -Pattern $LeafPath } |
-        Resolve-Path -RelativeBasePath $PasswordStorePath -Relative |
-        ForEach-Object {
-            if ($_ -match ".\\(?<path>.*).gpg") {
-                $matches['path']            
-            }
-            else {
-                $_
-            }
+    $Like = Get-ChildItem -Path $PasswordStorePath @ExcludeGit |
+    Get-ChildItem @LikeOptions |
+    Where-Object { $_.FullName | Select-String -Pattern $LeafPath } |
+    Resolve-Path -RelativeBasePath $PasswordStorePath -Relative |
+    ForEach-Object {
+        if ($_ -match ".\\(?<path>.*).gpg") {
+            $matches['path']            
         }
+        else {
+            $_
+        }
+    }
     return $Like
 }
 
@@ -144,9 +195,9 @@ switch ($Command) {
     generate { New-Password }
     insert { }
     find { Get-PasswordFile }
-    show { Read-Password }
+    show { Get-PasswordItems }
     ls {
-        tree /f $PasswordStorePath
+        Out-Tree $PasswordStorePath
     }
     default {
         Write-Host "$CommandOrPath has not been implemented yet."
