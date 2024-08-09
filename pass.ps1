@@ -21,6 +21,9 @@ param (
 )
 
 
+
+
+$ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $PasswordStoreName = ".password-store"
@@ -59,8 +62,8 @@ function Out-Tree {
 function Out-TreeInternal {
     Param(
         $Info,
-        [int]$Depth,
-        [bool]$Last
+        [int] $Depth,
+        [switch] $Last
     )
 
     if ($Depth -eq 0) {
@@ -107,19 +110,25 @@ function Write-Password {
 }
 
 # pass show
-function Get-PasswordItems {
+function Get-PasswordItem {
     if (Test-Path $AbsolutePath -PathType Container) {
         return (Out-Tree $AbsolutePath)
     }
     else {
-        return Read-Password
+        Get-Password        
     }
 }
 
-function Read-Password {
+function Get-Password {
     $Path = $KeyPath
-    $Password = (gpg.exe --decrypt $Path)
-    return (Write-Password $Password)
+    if (Test-Path $KeyPath -PathType Leaf) {
+        $Password = (gpg.exe --decrypt $Path)
+        return (Write-Password $Password)
+    }
+    else {
+        Write-Host "Error: ${RelativePath} is not in the password store."
+        exit -1
+    }
 }
 
 # pass find
@@ -149,7 +158,12 @@ function Get-PasswordFile {
 $Charset = ""
 
 # pass generate
-function New-Password {
+function Set-Password {
+    param (
+        [switch] $Generate,
+        $NewPassword
+    )
+    
     $Path = $KeyPath
     if (Test-Path $Path) {
         $Confirmation = Read-Host "An entry already exists for $RelativePath. Overwrite it? [y/N] "
@@ -157,45 +171,75 @@ function New-Password {
             exit
         }
     }
-    switch ($PasswordStyle) {
-        punct-alphnum {
-            $Charset = [char[]](33..126)
+
+    if ($Generate) {
+        switch ($PasswordStyle) {
+            punct-alphnum {
+                $Charset = [char[]](33..126)
+            }
+            alphnum {
+                $Charset = ([char[]]('a'..'z') + [char[]]('A'..'Z') + [char[]](48..57))
+            }
         }
-        alphnum {
-            $Charset = ([char[]]('a'..'z') + [char[]]('A'..'Z') + [char[]](48..57))
+        $Charset = $Charset -join ''
+        Write-Debug "$Charset"
+        $RandomParams = @{
+            Count   = $PasswordLength
+            Minimum = 0
+            Maximum = $Charset.Length
+        }
+        $NewPassword = (Get-SecureRandom @RandomParams
+            | ForEach-Object { $Charset[$_] }) -join ''
+
+
+        $KeyDir = Split-Path $KeyPath -Parent
+        if (! (Test-Path $KeyDir)) {
+            [void](New-Item -Type Directory -Path $KeyDir )
         }
     }
-    $Charset = $Charset -join ''
-    Write-Debug "$Charset"
-    $RandomParams = @{
-        Count   = $PasswordLength
-        Minimum = 0
-        Maximum = $Charset.Length
+    else {
+        if (-not $NewPassword) {
+            $NewPassword = Read-Host "Enter password for ${RelativePath}`:" -AsSecureString
+            $RetypePassword = Read-Host "Retype password for ${RelativePath}`:" -AsSecureString
+            if ($NewPassword -ne $RetypePassword) {
+                Write-Host "Error: the entered passwords do not match."
+                exit -1
+            }
+        }
     }
-    $NewPassword = (Get-SecureRandom @RandomParams
-        | ForEach-Object { $Charset[$_] }) -join ''
-
-
-    $KeyDir = Split-Path $KeyPath -Parent
-    if (! (Test-Path $KeyDir)) {
-        [void](New-Item -Type Directory -Path $KeyDir )
-    }
-
     Write-Output $NewPassword | gpg.exe -e -r $GpgId -o $KeyPath @GpgOpts
 
     return (Write-Password $NewPassword)
 }
 
-# pass insert
 
-# pass ls
-
+# pass rm
+function Remove-PasswordFile {
+    param (
+        [switch] $Generate,
+        $NewPassword
+    )
+    
+    $Path = $KeyPath
+    if (Test-Path $Path) {
+        $Confirmation = Read-Host "Are you sure you would like to delete ${RelativePath}? [y/N]"
+        if ($Confirmation -ne "y") {
+            exit
+        }
+        Remove-Item $Path
+    }
+    else {
+        Write-Host "Error: ${RelativePath} is not in the password store."
+        exit
+    }
+}
 
 switch ($Command) {
-    generate { New-Password }
-    insert { }
+    rm { Remove-PasswordFile }
+    generate { Set-Password -Generate }
+    insert { Set-Password }
     find { Get-PasswordFile }
-    show { Get-PasswordItems }
+    show { Get-PasswordItem }
     ls {
         Out-Tree $PasswordStorePath
     }
