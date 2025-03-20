@@ -44,17 +44,16 @@ function Invoke-PassFind {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory, Position = 0)]
-        [string]$PassName
+        [string]$Pattern
     )
     $PassStorePath = Get-PasswordStore
-    $LeafPath = Split-Path -Leaf $PassName
     $LikeOptions = @{
         Recurse = $true
     }
 
     $Like = (Get-ChildItem -Path $PassStorePath @ExcludeGit |
         Get-ChildItem @LikeOptions |
-        Where-Object { $_.FullName | Select-String -Pattern $LeafPath } |
+        Where-Object { $_.FullName | Select-String -Pattern $Pattern } |
         ForEach-Object { Get-PassName $_ $PassStorePath })
     return $Like
 }
@@ -78,7 +77,7 @@ function Invoke-PassGenerate {
     )
     $PassPath = Get-RealPath $PassName -MakeParentDirectoy $true
     if ((Test-Path $PassPath) -and (-not $Force)) {
-        $Confirmation = Read-Host "An entry already exists for $RelativePath. Overwrite it? [y/N] "
+        $Confirmation = Read-Host "An entry already exists for $PassName. Overwrite it? [y/N] "
         if ($Confirmation -ne 'y') {
             throw 'User interrupted.'
         }
@@ -408,6 +407,7 @@ function Out-TreeInternal {
     Param(
         [System.IO.FileSystemInfo] $Info,
         [int] $Depth,
+        [string] $Format,
         [switch] $Last
     )
     if (-not $Info) {
@@ -417,35 +417,36 @@ function Out-TreeInternal {
     Write-Debug $Info
     
     if ($Depth -eq 0) {
-        $Format = '{0}'
+        $DisplayFormat = '{0}'
     }
     else {
         $CurrentLeafFormat = if ($Last) { $LastLeafFormat } else { $LeafFormat }
-        $Format = $TrunkFormat * ($Depth - 1) + $CurrentLeafFormat + '{0}'
+        $DisplayFormat = $Format + $CurrentLeafFormat + '{0}'
+        $CurrentTrunkFormat = if ($Last) { "    " } else { "|   " }
+        $Format = $Format + $CurrentTrunkFormat
+
     }
 
     $KeyName = if ($Info.Name -match '(?<path>.*).gpg') { $Matches['path'] } else { $Info.Name }
     if (-not ($KeyName -like '.*' )) {
         Write-Debug $KeyName
-        Write-Output ($Format -f $KeyName)
+        Write-Output ($DisplayFormat -f $KeyName)
     }
 
     If (Test-Path -Path $Info.FullName -PathType Container) {
-        $Children = (Get-ChildItem @ExcludeGit $Info.FullName)
-        if ($Children -is [object[]]) {
-            switch ($Children.Length) {
-                0 { return; }
-                1 { Out-TreeInternal -Info $Children[0] -Depth ($Depth + 1) -Last }
-                Default {
-                    foreach ($child in $Children[0..($Children.Length - 2)]) {
-                        Out-TreeInternal -Info $child -Depth ($Depth + 1)
-                    }
-                    Out-TreeInternal -Info $Children[$Children.Length - 1] -Depth ($Depth + 1) -Last
-                }
+        $Children = @(Get-ChildItem @ExcludeGit $Info.FullName)
+        switch ($Children.Length) {
+            0 { break; }
+            1 {
+                Out-TreeInternal -Info $Children[0] -Depth ($Depth + 1) -Format $Format  -Last;
+                break;
             }
-        }
-        else {
-            Out-TreeInternal -Info $Children -Depth ($Depth + 1) -Last
+            Default {
+                foreach ($child in $Children[0..($Children.Length - 2)]) {
+                    Out-TreeInternal -Info $child -Depth ($Depth + 1)  -Format $Format
+                }
+                Out-TreeInternal -Info $Children[$Children.Length - 1] -Depth ($Depth + 1)  -Format $Format -Last
+            }
         }
     }
 }
@@ -665,6 +666,7 @@ $ExportSubcommandSplat = @{
         'Invoke-PassGenerate'
         'Invoke-PassInsert'
         'Invoke-PassList'
+        'Invoke-PassFind'
         'Invoke-PassGit'
     )
     Alias    = @(
