@@ -15,6 +15,10 @@ $ExcludeGit = @{
     Exclude = '.git*', '.gpg*'
 }
 
+if (-not (Test-Path Env:\PASSWORD_STORE_GENERATED_LENGTH)) {
+    $env:PASSWORD_STORE_GENERATED_LENGTH = 16
+}
+
 
 # pass show
 function Invoke-PassShow {
@@ -58,8 +62,8 @@ function Invoke-PassFind {
     return $Like
 }
 
-$PunctAlphNumCharset = ([char[]]([char]'a'..[char]'z') + [char[]]([char]'A'..[char]'Z') + [char[]](48..57)) -join ''
-$AlphNumCharset = ([char[]](33..126)) -join ''
+$AlphNumCharset = ([char[]]([char]'a'..[char]'z') + [char[]]([char]'A'..[char]'Z') + [char[]](48..57)) -join ''
+$PunctAlphNumCharset = ([char[]](33..126)) -join ''
 
 function Invoke-PassGenerate {
     [CmdletBinding()]
@@ -99,6 +103,11 @@ function Invoke-PassGenerate {
         Minimum = 0
         Maximum = $Charset.Length
     }
+
+    if (-not $PassLength) {
+        $PassLength = $env:PASSWORD_STORE_GENERATED_LENGTH
+    }
+
     $GeneratedPass = (
         1..$PassLength | ForEach-Object { $Charset[(Get-Random @RandomParams)] }
     ) -join ''
