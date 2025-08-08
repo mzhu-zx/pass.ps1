@@ -24,8 +24,8 @@ if (-not (Test-Path Env:\PASSWORD_STORE_GENERATED_LENGTH)) {
 function Invoke-PassShow {
     [CmdletBinding()]
     param (
-        [ArgumentCompleter({ PassPathCompleter @args })]
         [Parameter(Position = 0)]
+        [ArgumentCompleter({ Invoke-PassPathCompleter @args })]
         [string]$PassName = '',
         [switch]$Clip
     )
@@ -48,6 +48,7 @@ function Invoke-PassFind {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory, Position = 0)]
+        [ArgumentCompleter({ Invoke-PassPathCompleter @args })]
         [string]$Pattern
     )
     $PassStorePath = Get-PasswordStore
@@ -58,7 +59,7 @@ function Invoke-PassFind {
     $Like = (Get-ChildItem -Path $PassStorePath @ExcludeGit |
         Get-ChildItem @LikeOptions |
         Where-Object { $_.FullName | Select-String -Pattern $Pattern } |
-        ForEach-Object { Get-PassName $_ $PassStorePath })
+        ForEach-Object { Resolve-PassName $_ $PassStorePath })
     return $Like
 }
 
@@ -127,6 +128,7 @@ function Invoke-PassInsert {
         [switch] $Echo,
         [switch] $Force,
         [Parameter(Mandatory, Position = 0)]
+        [ArgumentCompleter({ Invoke-PassPathCompleter @args })]
         [string] $PassName,
         [Parameter(Position = 1)]        
         [string] $Plaintext
@@ -160,6 +162,7 @@ function Invoke-PassRemove {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory, Position = 0)]
+        [ArgumentCompleter({ Invoke-PassPathCompleter @args })]
         [string]$PassName
     )
     $PassItem = Get-PassItem $PassName
@@ -219,8 +222,10 @@ function Invoke-PassCopy {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory)]
+        [ArgumentCompleter({ Invoke-PassPathCompleter @args })]
         [string] $OldPassName,
         [Parameter(Mandatory)]
+        [ArgumentCompleter({ Invoke-PassPathCompleter @args })]
         [string] $NewPassName,
         [switch] $Force
     )
@@ -243,8 +248,10 @@ function Invoke-PassRename {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory)]
+        [ArgumentCompleter({ Invoke-PassPathCompleter @args })]
         [string] $OldPassName,
         [Parameter(Mandatory)]
+        [ArgumentCompleter({ Invoke-PassPathCompleter @args })]
         [string] $NewPassName,
         [switch] $Force
     )
@@ -313,6 +320,7 @@ function Invoke-PassGit {
 function Invoke-PassList {
     [CmdletBinding()]
     param (
+        [ArgumentCompleter({ Invoke-PassPathCompleter @args })]
         [string]$PassName = ''
     )    
     $PassPath = Get-RealPath $PassName -IsContainer $true
@@ -375,12 +383,14 @@ function Get-RealPath {
 <#
 Convert a file item into a password store name.
 #>
-function Get-PassName {
+function Resolve-PassName {
     param(
         [System.IO.FileSystemInfo]$PassItem,
         [string]$PassStorePath
     )
-    $RelativePath = Resolve-Path -Path $PassItem.FullName -RelativeBasePath $PassStorePath -Relative
+    #$RelativePath = Resolve-Path -Path $PassItem.FullName -RelativeBasePath $PassStorePath -Relative
+    # Use the Polyfill for 5.1
+    $RelativePath = Resolve-RelativePath $PassItem.FullName $PassStorePath
     $strip = if ($RelativePath -match '(.\\)?(?<path>.*)') {
         $matches['path']
     }
@@ -398,6 +408,21 @@ function Get-PassName {
     return $strip
 }
 
+<#
+.SYNOPSIS
+Compute the relative path of the path w.r.t. the second path. If the first is not an offspring of the reference path, the result is undefined.
+#>
+function Resolve-RelativePath {
+    param(
+        [string]$AbsolutePath, 
+        [string]$ReferencePath
+    )
+    if ($AbsolutePath.StartsWith($ReferencePath)) {
+        $AbsolutePath.Substring($ReferencePath.Length)
+    } else {
+        throw "'$AbsolutePath' doesn't start with '$ReferencePath'"
+    }
+}
 
 <#
 .SYNOPSIS
@@ -405,7 +430,7 @@ Display an item in the form of a tree.
 #>
 function Out-Tree {
     [CmdletBinding()]
-    Param(
+    param(
         [Parameter(Mandatory, Position = 0)]
         $Path
     )
@@ -413,7 +438,7 @@ function Out-Tree {
 }
 
 function Out-TreeInternal {
-    Param(
+    param(
         [System.IO.FileSystemInfo] $Info,
         [int] $Depth,
         [string] $Format,
@@ -431,7 +456,7 @@ function Out-TreeInternal {
     else {
         $CurrentLeafFormat = if ($Last) { $LastLeafFormat } else { $LeafFormat }
         $DisplayFormat = $Format + $CurrentLeafFormat + '{0}'
-        $CurrentTrunkFormat = if ($Last) { "    " } else { "|   " }
+        $CurrentTrunkFormat = if ($Last) { '    ' } else { '|   ' }
         $Format = $Format + $CurrentTrunkFormat
 
     }
@@ -442,13 +467,13 @@ function Out-TreeInternal {
         Write-Output ($DisplayFormat -f $KeyName)
     }
 
-    If (Test-Path -Path $Info.FullName -PathType Container) {
+    if (Test-Path -Path $Info.FullName -PathType Container) {
         $Children = @(Get-ChildItem @ExcludeGit $Info.FullName)
         switch ($Children.Length) {
             0 { break; }
             1 {
-                Out-TreeInternal -Info $Children[0] -Depth ($Depth + 1) -Format $Format  -Last;
-                break;
+                Out-TreeInternal -Info $Children[0] -Depth ($Depth + 1) -Format $Format  -Last
+                break
             }
             Default {
                 foreach ($child in $Children[0..($Children.Length - 2)]) {
@@ -462,15 +487,16 @@ function Out-TreeInternal {
 
 <#
 .SYNOPSIS
-Get the path to the password store.
+Get the normalized (absolute and ended with a trailing '/') path to the password store.
 
-The path is PASSWORD_STREO_DIR; otherwise, "$HOME/.password-store".
+The path is PASSWORD_STREO_DIR; otherwise, "$HOME/.password-store/".
 #>
 function Get-PasswordStore {
     $PassStorePath = $env:PASSWORD_STORE_DIR
     if (-not $PassStorePath) {
         $PassStorePath = "$HOME/.password-store"
     }
+    $PassStorePath = Resolve-Path "$PassStorePath/"
     return $PassStorePath
 }
 
@@ -617,9 +643,7 @@ function Invoke-Pass {
     }
 }
 
-# Register-ArgumentCompleter -CommandName Invoke-Pass -ScriptBlock { PassArgumentCompleter @args }
-
-function PassArgumentCompleter {
+function Invoke-PassArgumentCompleter {
     param (
         $commandName,
         $parameterName,
@@ -649,7 +673,7 @@ function PassArgumentCompleter {
 }
 
 
-function PassPathCompleter {
+function Invoke-PassPathCompleter {
     param (
         $commandName,
         $parameterName,
@@ -657,9 +681,12 @@ function PassPathCompleter {
         $commandAst,
         $fakeBoundParameters
     )
+    Get-PassPathCompletion $wordToComplete
+}
+function Get-PassPathCompletion ($wordToComplete) {
     $PassStorePath = Get-PasswordStore
     $PassPath = "$(Join-Path $PassStorePath $wordToComplete)*"
-    $suggestions = (Get-ChildItem $PassPath) | ForEach-Object { Get-PassName $_ $PassStorePath }
+    $suggestions = Get-ChildItem $PassPath | ForEach-Object { Resolve-PassName $_ $PassStorePath }
     $suggestions
 }
 
@@ -668,8 +695,8 @@ Set-Alias -Name 'pass' -Value 'Invoke-Pass'
 $ExportSubcommandSplat = @{
     Function = @(
         'Invoke-Pass'
-        'PassArgumentCompleter'
-        'PassPathCompleter'
+        'Invoke-PassArgumentCompleter'
+        'Invoke-PassPathCompleter'
         'Invoke-PassInit'
         'Invoke-PassShow'
         'Invoke-PassGenerate'
@@ -697,7 +724,16 @@ Install completers for the Pass module.
 
 #>
 function Install-PassCompanion {
-    Register-ArgumentCompleter -CommandName Invoke-Pass -ScriptBlock ${function:PassArgumentCompleter}
+    $nativeCompleter = {
+        param (
+            $wordToComplete,
+            $commandAst,
+            $cursorPosition
+        )
+        Get-PassPathCompletion $wordToComplete
+    }
+    Register-ArgumentCompleter -CommandName Invoke-Pass -ScriptBlock $nativeCompleter
+    Register-ArgumentCompleter -CommandName pass -ScriptBlock $nativeCompleter
 }
 
-Export-ModuleMember -Function Install-PassCompanion
+Install-PassCompanion
