@@ -63,7 +63,9 @@ function Invoke-PassFind {
     return $Like
 }
 
-$AlphNumCharset = ([char[]]([char]'a'..[char]'z') + [char[]]([char]'A'..[char]'Z') + [char[]](48..57)) -join ''
+$AlphNumCharset = ([char[]]([char]'a'..[char]'z') + `
+        [char[]]([char]'A'..[char]'Z') + `
+        [char[]](48..57)) -join ''
 $PunctAlphNumCharset = ([char[]](33..126)) -join ''
 
 function Invoke-PassGenerate {
@@ -239,8 +241,7 @@ function Invoke-PassCopy {
             throw 'User interrupted.'
         }
     }
-    $forceSplat = @{ Force = $Force }
-    Copy-Item $OldItem.FullName $NewItemPath @forceSplat
+    Copy-Item $OldItem.FullName $NewItemPath -Force:$Force
     Invoke-GitAddCopied -OldPath $OldPassName -NewPath $NewPassName -NewItemPath $NewItemPath
 }
 
@@ -269,10 +270,75 @@ function Invoke-PassRename {
     Invoke-GitRename @RenameSplat
 }
 
-###########################################################################
-# Git Helper
-###########################################################################
+# ## TOTP (RFC 6238) Support  
+<#
+.SYNOPSIS
+Insert an TOTP URL into an existing password file. If the PassName is not
+specified, use Otp's label instead.
+#>
+function Invoke-PassOtpInsert {
+    [CmdletBinding()]
+    param (
+        [switch] $Echo,
+        [switch] $Force,
+        [string] $PassName,
+        [Parameter(Mandatory)]
+        [string] $TotpUrl
+    )
 
+    $PassOtpSplat = @{
+        Echo     = $Echo
+        Force    = $Force   
+        PassName = $PassName 
+        TotpUrl  = $TotpUrl
+    }
+    Invoke-PassOtpInsertOrAppend @PassOtpSplat
+}
+
+<#
+.SYNOPSIS
+Append an TOTP URL into an existing password file. If the PassName is not 
+specified, use Otp's label instead.
+#>
+function Invoke-PassOtpAppend {
+    [CmdletBinding()]
+    param (
+        [switch] $Echo,
+        [switch] $Force,
+        [string] $PassName,
+        [Parameter(Mandatory)]
+        [string] $TotpUrl
+    )
+
+    $PassOtpSplat = @{
+        Append   = $True
+        Echo     = $Echo
+        Force    = $Force   
+        PassName = $PassName 
+        TotpUrl  = $TotpUrl
+    }
+    Invoke-PassOtpInsertOrAppend @PassOtpSplat
+}
+
+<#
+.SYNOPSIS
+Compute the current OTP.
+#>
+function Invoke-PassOtp {
+    [CmdletBinding()]
+    param (
+        [string] $PassName
+    )
+    $Plaintext = Invoke-PassShow $PassName
+    $ParsedTotp = Resolve-TotpUrl $Plaintext
+    if (-not $ParsedTotp) {
+        throw "No TOTP URL found in $PassName"
+    }
+    $Time = ([System.DateTimeOffset]::Now.ToUnixTimeSeconds())
+    Resolve-Totp -Secret $ParsedTotp.Secret -Interval 30 -Digits $ParsedTotp.Digits -Time $Time
+}
+
+#BEGIN Git Helper
 function Invoke-GitCommit($Message) {
     $GitWorkDir = Get-PasswordStore
     git -C $GitWorkDir commit -m $Message
@@ -298,7 +364,9 @@ function Invoke-GitAddCopied($OldPath, $NewPath, $NewItemPath) {
 }
 
 
-function Invoke-GitRename($OldPassName, $NewPassName, $OldPassPath, $NewPassPath, $Force) {
+function Invoke-GitRename(
+    $OldPassName, $NewPassName, $OldPassPath, $NewPassPath, $Force
+) {
     $GitWorkDir = Get-PasswordStore
     $forceSplat = if ($Force) { @('--force') } else { @() }
     git -C $GitWorkDir mv $OldPassPath $NewPassPath @forceSplat
@@ -327,6 +395,104 @@ function Invoke-PassList {
     Write-Debug "Path: $PassPath"
     Out-Tree $PassPath
 }
+#END Git Helper
+
+#BEGIN OTP Helper
+function Invoke-PassOtpInsertOrAppend {
+    [CmdletBiding()]
+    param (
+        [switch] $Echo,
+        [switch] $Force,
+        [string] $PassName,
+        [Parameter(Mandatory)]
+        [string] $TotpUrl,
+        [switch] $Append
+    )
+    $ParsedTotp = Resolve-TotpUrl $TotpUrl
+    if (-not $ParsedTotp) {
+        Write-Error "${TotpUrl} doesn't seem to be a valid TOTP URL."
+        return
+    }
+    $PassNameOrLabel = if (-not $PassName) { $Account } else { $PassName }
+
+    if ($Append) {
+        try {
+            $Plaintext = Invoke-PassShow $PassNameOrLabel
+        }
+        catch { }
+    }
+    $Plaintext += " ${TotpUri}"
+
+    $PassInsertSplat = @{
+        Echo      = $Echo
+        Force     = $Force   
+        PassName  = $PassNameOrLabel 
+        Plaintext = $Plaintext
+    }
+    Invoke-PassInsert @PassInsertSplat
+}
+
+<#
+.SYNOPSIS
+Compute the current TOTP value. 
+
+.PARAMETER  SECRET
+Base32 Encoded 
+
+.DESCRIPTION
+
+T/HTOP uses Big-Endian extensively:
+- The step, previous the Counter value, is 8-byte long, (UINT64_BE)
+- The secret is directly from the BASE32 conversion (MSB-first)
+- The final result is 4-byte long, (UINT32_BE)
+#>
+function Resolve-Totp([string]$Secret, [uint64]$Interval, [int]$Digits, [uint64]$Time) {
+    $DIGITS_POWER = @( 1,10,100,1000,10000,100000,1000000,10000000,100000000 )
+    $Step = [uint64][System.Math]::DivRem($Time, $Interval, [ref]$null)
+    $MsgBuffer = [System.BitConverter]::GetBytes($Step)
+    $KBuffer = ConvertFrom-Base32BE $Secret
+    if ([System.BitConverter]::IsLittleEndian) {
+        [array]::Reverse($MsgBuffer)
+    }
+    $hmac = [System.Security.Cryptography.HMACSHA1]::new($KBuffer)
+    $hash = $Hmac.ComputeHash($MsgBuffer)
+    $offset = $hash[$hash.length - 1] -band 0xf
+    $hash = $hash[$offset..($offset+3)]
+    if ([System.BitConverter]::IsLittleEndian) {
+        [array]::Reverse($hash)
+    }
+    $binary = [System.BitConverter]::ToUInt32($hash, 0) -band 0x7fffffff
+    $otp = $binary % $DIGITS_POWER[$Digits]
+    $otp.ToString().PadLeft($Digits, '0')
+}
+
+<#
+.SYNOPSIS
+Convert Base32-encoded string into bytes.
+#>
+function ConvertFrom-Base32BE([string]$encoded) {
+    $bytes = [byte[]]::new([math]::DivRem((7 + 5 * $encoded.Length),  8, [ref]$null))
+    $nbits = 0; $ibyte = 0
+    foreach ($c in $encoded.ToUpperInvariant().ToCharArray()) {
+        $v = if (('A' -le $c) -and ($c -le 'Z')) { [int]([char]$c - [char]'A') } else { 26 + [int]([char]$c - [char]'2') }
+        $nbits += 5 
+        if ($nbits -lt 8) {
+            $bytes[$ibyte] = $bytes[$ibyte] -bor ($v -shl (8 - $nbits))
+        }
+        else {
+            # bits to be placed in the next byte
+            $nbits %= 8
+            $bytes[$ibyte] = $bytes[$ibyte] -bor ($v -shr $nbits)
+            $ibyte ++
+            $bmask = (1 -shl $nbits) - 1
+            if ($bmask -ne 0) {
+                $bytes[$ibyte] = $bytes[$ibyte] -bor (($v -band $bmask) -shl (8 - $nbits))
+            }
+        }
+    }
+    $bytes
+}
+#END OTP Helper
 
 ###########################################################################
 # Utilities
@@ -388,7 +554,6 @@ function Resolve-PassName {
         [System.IO.FileSystemInfo]$PassItem,
         [string]$PassStorePath
     )
-    #$RelativePath = Resolve-Path -Path $PassItem.FullName -RelativeBasePath $PassStorePath -Relative
     # Use the Polyfill for 5.1
     $RelativePath = Resolve-RelativePath $PassItem.FullName $PassStorePath
     $strip = if ($RelativePath -match '(.\\)?(?<path>.*)') {
@@ -410,7 +575,8 @@ function Resolve-PassName {
 
 <#
 .SYNOPSIS
-Compute the relative path of the path w.r.t. the second path. If the first is not an offspring of the reference path, the result is undefined.
+Compute the relative path of the path w.r.t. the second path. If the first is 
+not an offspring of the reference path, the result is undefined.
 #>
 function Resolve-RelativePath {
     param(
@@ -419,7 +585,8 @@ function Resolve-RelativePath {
     )
     if ($AbsolutePath.StartsWith($ReferencePath)) {
         $AbsolutePath.Substring($ReferencePath.Length)
-    } else {
+    }
+    else {
         throw "'$AbsolutePath' doesn't start with '$ReferencePath'"
     }
 }
@@ -543,6 +710,58 @@ function Write-PassHost {
 }
 
 
+## OTP Utilities
+
+function Format-TotpUrl([string]$Account, [string]$Secret, [string]$Issuer) {
+    $EncodedIssuer = [uri]::EscapeDataString($Issuer)
+    if (-not $Issuer) {
+        "otpauth://totp/${Account}?secret=${Secret}"
+    }
+    else {
+        "otpauth://totp/${$EncodedIssuer}:${Account}?secret=${Secret}&issuer={$EncodedIssuer}"
+    }
+}
+
+function Resolve-TotpUrl([string]$TotpUrl) {
+    if ($TotpUrl -match "otpauth://\S+") {
+        $TotpUrl = $Matches.0
+    } else {
+        return $null
+    }
+    $uri = [uri]$TotpUrl
+    if ($uri -and ($uri.Authority -eq "totp")) {
+        $DecodedLabel = [uri]::UnescapeDataString($uri.LocalPath.Substring(1)) -split ':'
+        if ($DecodedLabel.Length -eq 1) {
+            $Account = $DecodedLabel[0]
+            $Issuer = ''
+        }
+        elseif ($DecodedLabel.Length -eq 2) {
+            $Account = $DecodedLabel[1]
+            $Issuer = $DecodedLabel[0]
+        }
+
+        $Digits = 6
+        if ($uri.Query -match "[?&]digits=(?<Digits>\d+)") {
+            $Digits = [int]$Matches.Digits
+        }
+
+        if ($uri.Query -match "[?&]secret=(?<Secret>[^&]+)") {
+            $Secret = $Matches.Secret
+        } else {
+            return $null
+        }
+
+        return @{
+            Account = $Account
+            Issuer  = $Issuer
+            Secret  = $Secret
+            Digits  = $Digits
+        }
+    }
+}
+
+## Completions Utilities
+
 <#
 .SYNOPSIS
 Utility function to simplify adding attributes in dynamic parameters.
@@ -577,8 +796,11 @@ function Read-HostMasked {
     param (
         [string] $Prompt
     )
-    ([Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($(Read-Host -AsSecureString -Prompt $Prompt))))
+    ([Runtime.InteropServices.Marshal]::PtrToStringAuto(`
+            [Runtime.InteropServices.Marshal]::SecureStringToBSTR(`
+            $(Read-Host -AsSecureString -Prompt $Prompt))))
 }
+
 
 ###########################################################################
 # CLI Wrapper
@@ -633,6 +855,9 @@ function Invoke-Pass {
                 Invoke-PassGit @ArgsRest
                 break
             }
+            opt {
+                Invoke-PassOtp @ArgsRest
+            }
             { $_ -in @('grep', 'edit', 'help', 'version') } {
                 throw "PASS-PS: $Subcommand has not been implemented yet."
             }
@@ -686,7 +911,8 @@ function Invoke-PassPathCompleter {
 function Get-PassPathCompletion ($wordToComplete) {
     $PassStorePath = Get-PasswordStore
     $PassPath = "$(Join-Path $PassStorePath $wordToComplete)*"
-    $suggestions = Get-ChildItem $PassPath | ForEach-Object { Resolve-PassName $_ $PassStorePath }
+    $suggestions = (Get-ChildItem $PassPath |
+        ForEach-Object { Resolve-PassName $_ $PassStorePath })
     $suggestions
 }
 
@@ -704,6 +930,10 @@ $ExportSubcommandSplat = @{
         'Invoke-PassList'
         'Invoke-PassFind'
         'Invoke-PassGit'
+        'Invoke-PassOtp'
+        'Invoke-PassOtpInsert'
+        'Invoke-PassOtpAppend'
+        'Resolve-TotpUrl'
     )
     Alias    = @(
         'pass'
