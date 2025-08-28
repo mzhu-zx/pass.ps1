@@ -330,12 +330,12 @@ function Invoke-PassOtp {
         [string] $PassName
     )
     $Plaintext = Invoke-PassShow $PassName
-    $ParsedTotp = Resolve-TotpUrl $Plaintext
-    if (-not $ParsedTotp) {
+    $Totp = Resolve-TotpUrl $Plaintext
+    if (-not $Totp) {
         throw "No TOTP URL found in $PassName"
     }
-    $Time = ([System.DateTimeOffset]::Now.ToUnixTimeSeconds())
-    Resolve-Totp -Secret $ParsedTotp.Secret -Interval 30 -Digits $ParsedTotp.Digits -Time $Time
+    $Now = ([System.DateTimeOffset]::Now.ToUnixTimeSeconds())
+    Resolve-Totp -Secret $Totp.Secret -Interval $Totp.Period -Digits $Totp.Digits -Time $Now
 }
 
 #BEGIN Git Helper
@@ -745,6 +745,11 @@ function Resolve-TotpUrl([string]$TotpUrl) {
             $Digits = [int]$Matches.Digits
         }
 
+        $Period = 30
+        if ($uri.Query -match "[?&]period=(?<Period>\d+)") {
+            $Period = [int]$Matches.Period
+        }
+
         if ($uri.Query -match "[?&]secret=(?<Secret>[^&]+)") {
             $Secret = $Matches.Secret
         } else {
@@ -756,6 +761,7 @@ function Resolve-TotpUrl([string]$TotpUrl) {
             Issuer  = $Issuer
             Secret  = $Secret
             Digits  = $Digits
+            Period  = $Period
         }
     }
 }
@@ -855,7 +861,7 @@ function Invoke-Pass {
                 Invoke-PassGit @ArgsRest
                 break
             }
-            opt {
+            otp {
                 Invoke-PassOtp @ArgsRest
             }
             { $_ -in @('grep', 'edit', 'help', 'version') } {
